@@ -43,13 +43,16 @@ logger = logging.getLogger("AGY-GW")
 # --- Concurrency Control ---
 # Limits how many agy processes can run simultaneously to prevent OOM
 process_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+# Lock to ensure settings.json is not corrupted during concurrent spawns
+settings_lock = asyncio.Lock()
+SETTINGS_PATH = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
 
 # --- Core: CLI Executor ---
 class AgyExecutor:
     """Safely executes the agy CLI in non-interactive print mode."""
     
     @staticmethod
-    async def run_stream(prompt: str, user_id: str):
+    async def run_stream(prompt: str, user_id: str, model: str = None):
         """Yields output chunks from the agy process."""
         session_file = os.path.join(SESSION_DIR, f"{user_id}.sid")
         conversation_id = None
@@ -74,6 +77,23 @@ class AgyExecutor:
         })
 
         async with process_semaphore:
+            # Dynamically switch the model in settings.json
+            if model and model != "antigravity" and model != "antigravity-commercial":
+                async with settings_lock:
+                    try:
+                        # Read current settings
+                        with open(SETTINGS_PATH, "r") as f:
+                            settings = json.load(f)
+                        
+                        # Only write if different
+                        if settings.get("model") != model:
+                            logger.info(f"Switching engine model to: {model}")
+                            settings["model"] = model
+                            with open(SETTINGS_PATH, "w") as f:
+                                json.dump(settings, f)
+                    except Exception as e:
+                        logger.error(f"Failed to switch model: {e}")
+
             process = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -96,9 +116,6 @@ class AgyExecutor:
                 err = await process.stderr.read()
                 logger.error(f"Agy Process Error: {err.decode('utf-8', 'ignore')}")
             else:
-                # If this was a new session, we need to extract the conversation ID
-                # Actually, agy --print doesn't easily output the conversation ID.
-                # For commercial use, if we can't extract it, we treat it as stateless.
                 pass
 
 # --- API Server ---
@@ -156,38 +173,39 @@ class GatewayServer:
         prompt = messages[-1]["content"] if messages else ""
         stream = req.get("stream", False)
         user_id = req.get("user", "default_user")
+        model = req.get("model", "gemini-3.1-pro-high")
         
-        logger.info(f"[{self.request_id}] Req: {prompt[:30]}... (User={user_id}, Stream={stream})")
+        logger.info(f"[{self.request_id}] Req: {prompt[:30]}... (User={user_id}, Model={model}, Stream={stream})")
 
         if stream:
-            await self.stream_response(prompt, user_id)
+            await self.stream_response(prompt, user_id, model)
         else:
-            await self.block_response(prompt, user_id)
+            await self.block_response(prompt, user_id, model)
 
-    async def block_response(self, prompt, user_id):
+    async def block_response(self, prompt, user_id, model):
         full_text = ""
-        async for chunk in AgyExecutor.run_stream(prompt, user_id):
+        async for chunk in AgyExecutor.run_stream(prompt, user_id, model):
             full_text += chunk
         
         await self.respond_json({
             "id": f"chatcmpl-{self.request_id}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": "antigravity-commercial",
+            "model": model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": full_text.strip()}, "finish_reason": "stop"}]
         })
 
-    async def stream_response(self, prompt, user_id):
+    async def stream_response(self, prompt, user_id, model):
         self.writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n")
         await self.writer.drain()
         
-        async for chunk in AgyExecutor.run_stream(prompt, user_id):
+        async for chunk in AgyExecutor.run_stream(prompt, user_id, model):
             if not chunk: continue
             payload = {
                 "id": f"chatcmpl-{self.request_id}",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
-                "model": "antigravity-commercial",
+                "model": model,
                 "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}]
             }
             self.writer.write(f"data: {json.dumps(payload)}\n\n".encode())
