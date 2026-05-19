@@ -1,48 +1,43 @@
-# Antigravity Gateway (AGY-GW)
+# Antigravity Stealth Gateway (AGY-SG)
 
-A modern, high-performance OpenAI-compatible gateway for the Antigravity CLI. 
+A hardened, professional-grade OpenAI-compatible gateway for the Antigravity CLI, engineered for **maximum stealth** and **high-fidelity** automation.
 
-> [!NOTE]
-> This is a complete rewrite from the ground up, built for speed and robustness.
+## Stealth Architecture
 
-## Features
+Unlike simple wrappers, **AGY-SG** implements several layers of obfuscation to ensure that your automated requests are indistinguishable from legitimate human interaction:
 
-- **Asynchronous Engine**: Built on Python's `asyncio` for maximum concurrency.
-- **Real-time Streaming**: Supports OpenAI-compatible Server-Sent Events (SSE).
-- **Direct CLI Integration**: Wraps the `agy` CLI natively, no proxying required.
-- **Zero Dependencies**: Runs on standard Python 3.11+.
+1.  **PTY Emulation**: Spawns the CLI inside a virtual pseudo-terminal (PTY). This tricks the application into enabling interactive-only features and bypassing basic script detection.
+2.  **Telemetry Scrubbing**: Automatically blocks common tracking and telemetry signals (Sentry, Analytics) at the process level using hardened environment variables.
+3.  **Human Jitter**: Implements stochastic timing delays (jitter) to mimic human input cadence and avoid pattern-based detection.
+4.  **Session Persistence**: Native support for conversation ID mapping, allowing you to maintain long-running threads without manual intervention.
 
-## Setup
+## Quick Start
 
 ```bash
 chmod +x run.sh
 ./run.sh
 ```
 
-## Usage
+## Advanced Features
 
-### Standard Completion
-```bash
-curl http://127.0.0.1:8789/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-1.5-pro",
-    "messages": [{"role": "user", "content": "How are you?"}]
-  }'
-```
+### 1. Streaming (SSE)
+Supports real-time streaming of response tokens for a low-latency UI experience.
 
-### Streaming Completion
-```bash
-curl http://127.0.0.1:8789/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-1.5-pro",
-    "messages": [{"role": "user", "content": "Write a long story."}],
-    "stream": true
-  }'
+### 2. Multi-Session Mapping
+Pass a `user` parameter in your OpenAI request to maintain separate persistent sessions for different users.
+
+```json
+{
+  "model": "antigravity",
+  "messages": [{"role": "user", "content": "Analyze this code."}],
+  "user": "user_123"
+}
 ```
 
 ## Monitoring
 
-You can use the health check endpoint to verify the server status:
+Access the stealth health check:
 `GET /health`
+
+> [!WARNING]
+> This tool is designed for private, legitimate automation. Use responsibly and in accordance with your organization's security policies.
