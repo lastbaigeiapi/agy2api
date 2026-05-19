@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
 Antigravity Gateway (AGY-GW) - Commercial Edition
-A robust, production-ready OpenAI-compatible REST API for the Antigravity CLI.
-
-Features:
-- Concurrency Management (Semaphore-based Rate Limiting)
-- Session State Persistence (Maps users to agy conversation IDs)
-- API Key Authentication
-- Real-time SSE Streaming
-- Resource-optimized Execution (No TUI scraping)
+Production-ready OpenAI-compatible REST API for the Antigravity CLI.
+Uses stdlib http.server for maximum stability (zero external dependencies).
 """
 
 import asyncio
@@ -16,23 +10,25 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 import time
 import uuid
-from http import HTTPStatus
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+import subprocess
+import threading
 
 # --- Configuration ---
 PORT = int(os.environ.get("PORT", "8789"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 AGY_BIN = os.environ.get("AGY_BIN", "agy")
 API_KEYS = [k.strip() for k in os.environ.get("API_KEYS", "").split(",") if k.strip()]
-MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT", "5"))
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "5"))
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
-SESSION_DIR = os.path.expanduser("~/.antigravity_sessions")
+SETTINGS_PATH = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
 
-os.makedirs(SESSION_DIR, exist_ok=True)
-
-# --- Logging Setup ---
+# --- Logging ---
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -40,200 +36,251 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AGY-GW")
 
-# --- Concurrency Control ---
-# Limits how many agy processes can run simultaneously to prevent OOM
-process_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-# Lock to ensure settings.json is not corrupted during concurrent spawns
-settings_lock = asyncio.Lock()
-SETTINGS_PATH = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
+# --- Concurrency ---
+_semaphore = threading.Semaphore(MAX_CONCURRENT)
+_settings_lock = threading.Lock()
 
-# --- Core: CLI Executor ---
-class AgyExecutor:
-    """Safely executes the agy CLI in non-interactive print mode."""
-    
-    @staticmethod
-    async def run_stream(prompt: str, user_id: str, model: str = None):
-        """Yields output chunks from the agy process."""
-        session_file = os.path.join(SESSION_DIR, f"{user_id}.sid")
-        conversation_id = None
-        
-        # Load previous conversation ID if exists
-        if os.path.exists(session_file):
-            with open(session_file, "r") as f:
-                conversation_id = f.read().strip()
+# --- Model Mapping ---
+# Maps OpenAI-style model names to agy internal model identifiers
+MODEL_MAP = {
+    "gemini-3.1-pro-high": "gemini-2.5-pro",
+    "gemini-3.5-flash-high": "gemini-2.5-flash",
+    "claude-4-5-sonnet": "claude-3-5-sonnet",
+    "claude-opus-4-6": "claude-3-opus",
+    "google-jarvis-v4s": "gemini-2.5-pro",
+    # Pass-through: if not in map, use as-is
+}
 
-        args = [AGY_BIN, "--print", "--prompt", prompt]
-        if conversation_id:
-            args.extend(["--conversation", conversation_id])
-            
-        logger.debug(f"Executing: {' '.join(args)}")
-        
-        # Stealth environment
-        env = os.environ.copy()
-        env.update({
-            "DO_NOT_TRACK": "1",
-            "SENTRY_DSN": "",
-            "GOOGLE_ANALYTICS_ID": ""
-        })
-
-        async with process_semaphore:
-            # Dynamically switch the model in settings.json
-            if model and model != "antigravity" and model != "antigravity-commercial":
-                async with settings_lock:
-                    try:
-                        # Read current settings
-                        with open(SETTINGS_PATH, "r") as f:
-                            settings = json.load(f)
-                        
-                        # Only write if different
-                        if settings.get("model") != model:
-                            logger.info(f"Switching engine model to: {model}")
-                            settings["model"] = model
-                            with open(SETTINGS_PATH, "w") as f:
-                                json.dump(settings, f)
-                    except Exception as e:
-                        logger.error(f"Failed to switch model: {e}")
-
-            process = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env
-            )
-            
-            output_buffer = ""
-            while True:
-                chunk = await process.stdout.read(1024)
-                if not chunk:
-                    break
-                decoded = chunk.decode('utf-8', errors='ignore')
-                output_buffer += decoded
-                yield decoded
-                
-            await process.wait()
-            
-            if process.returncode != 0:
-                err = await process.stderr.read()
-                logger.error(f"Agy Process Error: {err.decode('utf-8', 'ignore')}")
-            else:
-                pass
-
-# --- API Server ---
-class GatewayServer:
-    def __init__(self, reader, writer):
-        self.reader = reader
-        self.writer = writer
-        self.request_id = str(uuid.uuid4())
-
-    async def serve(self):
+def switch_model(model: str):
+    """Hot-swap the model in settings.json."""
+    if not model or model in ("antigravity", "antigravity-commercial"):
+        return
+    with _settings_lock:
         try:
-            line = await self.reader.readline()
-            if not line: return
-            
-            method, path, _ = line.decode().split()
-            headers = {}
-            while True:
-                line = await self.reader.readline()
-                if line == b"\r\n" or not line: break
-                k, v = line.decode().split(":", 1)
-                headers[k.strip().lower()] = v.strip()
-
-            # Authentication check
-            if API_KEYS:
-                auth = headers.get("authorization", "")
-                token = auth.split("Bearer ")[-1] if "Bearer" in auth else ""
-                if token not in API_KEYS:
-                    await self.respond_status(HTTPStatus.UNAUTHORIZED, "Invalid API Key")
-                    return
-
-            if method == "POST" and path == "/v1/chat/completions":
-                body = await self.reader.readexactly(int(headers.get("content-length", 0)))
-                await self.handle_chat(json.loads(body))
-            elif method == "GET" and path == "/health":
-                await self.respond_json({
-                    "status": "online", 
-                    "engine": "agy-gw-commercial",
-                    "concurrency_limit": MAX_CONCURRENT_REQUESTS
-                })
-            else:
-                await self.respond_status(HTTPStatus.NOT_FOUND, "Not Found")
-                
+            with open(SETTINGS_PATH, "r") as f:
+                settings = json.load(f)
+            current = settings.get("model")
+            if current != model:
+                logger.info(f"Switching model: {current} -> {model}")
+                settings["model"] = model
+                with open(SETTINGS_PATH, "w") as f:
+                    json.dump(settings, f)
         except Exception as e:
-            logger.error(f"[{self.request_id}] Server error: {e}")
-            try:
-                await self.respond_status(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
-            except:
-                pass
-        finally:
-            self.writer.close()
-            await self.writer.wait_closed()
+            logger.error(f"Model switch failed: {e}")
 
-    async def handle_chat(self, req):
-        messages = req.get("messages", [])
+def run_agy(prompt: str, model: str = None):
+    """Execute agy --print synchronously and return the output."""
+    switch_model(model)
+
+    env = os.environ.copy()
+    env.update({
+        "DO_NOT_TRACK": "1",
+        "SENTRY_DSN": "",
+        "GOOGLE_ANALYTICS_ID": "",
+    })
+
+    args = [AGY_BIN, "--print", prompt]
+    logger.debug(f"Exec: {' '.join(args)}")
+
+    _semaphore.acquire()
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
+        )
+        if proc.returncode != 0:
+            logger.error(f"agy stderr: {proc.stderr[:500]}")
+        return proc.stdout.strip()
+    except subprocess.TimeoutExpired:
+        logger.error("agy process timed out (300s)")
+        return "[Error] Request timed out."
+    except Exception as e:
+        logger.error(f"agy exec error: {e}")
+        return f"[Error] {e}"
+    finally:
+        _semaphore.release()
+
+def run_agy_stream(prompt: str, model: str = None):
+    """Execute agy --print and yield output chunks as they arrive."""
+    switch_model(model)
+
+    env = os.environ.copy()
+    env.update({
+        "DO_NOT_TRACK": "1",
+        "SENTRY_DSN": "",
+        "GOOGLE_ANALYTICS_ID": "",
+    })
+
+    args = [AGY_BIN, "--print", prompt]
+    logger.debug(f"Exec (stream): {' '.join(args)}")
+
+    _semaphore.acquire()
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        for chunk in iter(lambda: proc.stdout.read(512), b""):
+            yield chunk.decode("utf-8", errors="ignore")
+        proc.wait()
+        if proc.returncode != 0:
+            err = proc.stderr.read().decode("utf-8", "ignore")
+            logger.error(f"agy stderr: {err[:500]}")
+    except Exception as e:
+        logger.error(f"agy stream error: {e}")
+        yield f"[Error] {e}"
+    finally:
+        _semaphore.release()
+
+
+class GatewayHandler(BaseHTTPRequestHandler):
+    """Handles OpenAI-compatible API requests."""
+
+    # Suppress default stderr logging per-request
+    def log_message(self, fmt, *args):
+        logger.debug(fmt % args)
+
+    def _send_json(self, code, data):
+        body = json.dumps(data).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _check_auth(self):
+        if not API_KEYS:
+            return True
+        auth = self.headers.get("Authorization", "")
+        token = auth.replace("Bearer ", "").strip()
+        if token in API_KEYS:
+            return True
+        self._send_json(401, {"error": {"message": "Invalid API Key", "type": "auth_error", "code": 401}})
+        return False
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight."""
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._send_json(200, {
+                "status": "online",
+                "engine": "agy-gw-commercial",
+                "concurrency_limit": MAX_CONCURRENT,
+            })
+        elif self.path == "/v1/models":
+            models = [
+                {"id": m, "object": "model", "owned_by": "antigravity"}
+                for m in MODEL_MAP
+            ]
+            self._send_json(200, {"object": "list", "data": models})
+        else:
+            self._send_json(404, {"error": {"message": "Not Found"}})
+
+    def do_POST(self):
+        if not self._check_auth():
+            return
+
+        if self.path != "/v1/chat/completions":
+            self._send_json(404, {"error": {"message": "Not Found"}})
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length))
+
+        messages = body.get("messages", [])
         prompt = messages[-1]["content"] if messages else ""
-        stream = req.get("stream", False)
-        user_id = req.get("user", "default_user")
-        model = req.get("model", "gemini-3.1-pro-high")
-        
-        logger.info(f"[{self.request_id}] Req: {prompt[:30]}... (User={user_id}, Model={model}, Stream={stream})")
+        stream = body.get("stream", False)
+        model = body.get("model", "gemini-3.1-pro-high")
+        req_id = str(uuid.uuid4())[:8]
+
+        logger.info(f"[{req_id}] Model={model} Stream={stream} Prompt={prompt[:40]}...")
 
         if stream:
-            await self.stream_response(prompt, user_id, model)
+            self._handle_stream(req_id, prompt, model)
         else:
-            await self.block_response(prompt, user_id, model)
+            self._handle_block(req_id, prompt, model)
 
-    async def block_response(self, prompt, user_id, model):
-        full_text = ""
-        async for chunk in AgyExecutor.run_stream(prompt, user_id, model):
-            full_text += chunk
-        
-        await self.respond_json({
-            "id": f"chatcmpl-{self.request_id}",
+    def _handle_block(self, req_id, prompt, model):
+        output = run_agy(prompt, model)
+        self._send_json(200, {
+            "id": f"chatcmpl-{req_id}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": full_text.strip()}, "finish_reason": "stop"}]
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": output},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         })
 
-    async def stream_response(self, prompt, user_id, model):
-        self.writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n")
-        await self.writer.drain()
-        
-        async for chunk in AgyExecutor.run_stream(prompt, user_id, model):
-            if not chunk: continue
+    def _handle_stream(self, req_id, prompt, model):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        for chunk in run_agy_stream(prompt, model):
+            if not chunk:
+                continue
             payload = {
-                "id": f"chatcmpl-{self.request_id}",
+                "id": f"chatcmpl-{req_id}",
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [{"index": 0, "delta": {"content": chunk}, "finish_reason": None}]
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": chunk},
+                    "finish_reason": None
+                }]
             }
-            self.writer.write(f"data: {json.dumps(payload)}\n\n".encode())
-            await self.writer.drain()
-        
-        self.writer.write(b"data: [DONE]\n\n")
-        await self.writer.drain()
+            self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
+            self.wfile.flush()
 
-    async def respond_json(self, data):
-        body = json.dumps(data).encode()
-        resp = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
-        self.writer.write(resp)
-        await self.writer.drain()
+        # Send final stop chunk
+        stop_payload = {
+            "id": f"chatcmpl-{req_id}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        }
+        self.wfile.write(f"data: {json.dumps(stop_payload)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
-    async def respond_status(self, status, message=""):
-        body = json.dumps({"error": {"message": message, "type": "invalid_request_error", "code": status.value}}).encode()
-        self.writer.write(f"HTTP/1.1 {status.value} {status.phrase}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
-        await self.writer.drain()
 
-async def main():
-    server = await asyncio.start_server(lambda r, w: GatewayServer(r, w).serve(), HOST, PORT)
-    logger.info(f"AGY-GW Commercial Edition online at {HOST}:{PORT}")
-    
-    async with server:
-        await server.serve_forever()
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Thread-per-request HTTP server for concurrent handling."""
+    allow_reuse_address = True
+    daemon_threads = True
 
-if __name__ == "__main__":
+
+def main():
+    server = ThreadedHTTPServer((HOST, PORT), GatewayHandler)
+    logger.info(f"AGY-GW Commercial Edition online at http://{HOST}:{PORT}")
+    logger.info(f"Concurrency limit: {MAX_CONCURRENT} | Auth: {'enabled' if API_KEYS else 'disabled'}")
     try:
-        asyncio.run(main())
+        server.serve_forever()
     except KeyboardInterrupt:
         logger.info("Shutting down...")
+        server.shutdown()
+
+
+if __name__ == "__main__":
+    main()
