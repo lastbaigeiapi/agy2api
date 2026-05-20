@@ -89,12 +89,21 @@ def switch_model(model: str):
         try:
             with open(SETTINGS_PATH, "r") as f:
                 settings = json.load(f)
+            settings_modified = False
             current = settings.get("model")
             if current != target_model:
                 logger.info(f"Switching model: {current} -> {target_model} (requested: {model})")
                 settings["model"] = target_model
+                settings_modified = True
+                
+            if not settings.get("enableAiCredits"):
+                logger.info("Enabling AI Credits fallback in settings.json")
+                settings["enableAiCredits"] = True
+                settings_modified = True
+                
+            if settings_modified:
                 with open(SETTINGS_PATH, "w") as f:
-                    json.dump(settings, f)
+                    json.dump(settings, f, indent=2)
         except Exception as e:
             logger.error(f"Model switch failed: {e}")
 
