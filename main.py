@@ -416,6 +416,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
         output = run_agy(prompt, model)
         reasoning_content, content = split_thinking_text(output)
         
+        prompt_tokens = len(prompt) // 4
+        completion_tokens = len(output) // 4
+        total_tokens = prompt_tokens + completion_tokens
+        
         message = {"role": "assistant", "content": content}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
@@ -430,7 +434,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "message": message,
                 "finish_reason": "stop"
             }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
         })
 
     def _handle_stream(self, req_id, prompt, model):
@@ -441,10 +445,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
+        prompt_tokens = len(prompt) // 4
+        completion_len = 0
+
         # Parse stream using helper to dynamically separate thinking from final content
         for field_name, text in parse_thinking_stream(run_agy_stream(prompt, model)):
             if not text:
                 continue
+            completion_len += len(text)
             payload = {
                 "id": f"chatcmpl-{req_id}",
                 "object": "chat.completion.chunk",
@@ -458,6 +466,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
             }
             self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
             self.wfile.flush()
+
+        completion_tokens = completion_len // 4
+        total_tokens = prompt_tokens + completion_tokens
+
+        # Send usage chunk before final stop
+        usage_payload = {
+            "id": f"chatcmpl-{req_id}",
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [],
+            "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
+        }
+        self.wfile.write(f"data: {json.dumps(usage_payload)}\n\n".encode())
 
         # Send final stop chunk
         stop_payload = {
