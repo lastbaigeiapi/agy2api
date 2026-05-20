@@ -374,6 +374,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {json.dumps(stop_payload)}\n\n".encode())
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+        self.close_connection = True
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
