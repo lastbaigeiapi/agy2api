@@ -265,6 +265,8 @@ def parse_thinking_stream(generator):
                         buffer = ""
                     if text_to_yield:
                         yield "content", text_to_yield
+                    if buffer and not text_to_yield:
+                        break
             elif state == "reasoning":
                 idx = buffer.find("</think>")
                 if idx != -1:
@@ -288,6 +290,8 @@ def parse_thinking_stream(generator):
                         buffer = ""
                     if text_to_yield:
                         yield "reasoning_content", text_to_yield
+                    if buffer and not text_to_yield:
+                        break
     if buffer:
         yield "content" if state == "content" else "reasoning_content", buffer
 
