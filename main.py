@@ -72,36 +72,27 @@ def switch_model(model: str):
     target_model = MODEL_MAP.get(model)
     if not target_model:
         model_lower = model.lower()
-        if "flash" in model_lower or "mini" in model_lower or "turbo" in model_lower or "3.5" in model_lower or "lite" in model_lower:
-            target_model = "gemini-2.5-flash"
+        if "flash" in model_lower or "mini" in model_lower or "turbo" in model_lower or "lite" in model_lower:
+            target_model = "gemini-3.5-flash-high"
         elif "sonnet" in model_lower:
             target_model = "claude-3-5-sonnet"
         elif "opus" in model_lower:
             target_model = "claude-3-opus"
         elif "jarvis" in model_lower:
             target_model = "google-jarvis-v4s"
-        elif "pro" in model_lower or "3.1" in model_lower:
-            target_model = "gemini-3.1-pro"
+        elif "pro" in model_lower or "3.1" in model_lower or "3.5" in model_lower:
+            target_model = "gemini-3.5-pro-preview"
         else:
-            target_model = "gemini-2.5-pro"  # Robust default fallback
+            target_model = "gemini-3.5-flash-high"  # Robust default fallback
 
     with _settings_lock:
         try:
             with open(SETTINGS_PATH, "r") as f:
                 settings = json.load(f)
-            settings_modified = False
             current = settings.get("model")
             if current != target_model:
                 logger.info(f"Switching model: {current} -> {target_model} (requested: {model})")
                 settings["model"] = target_model
-                settings_modified = True
-                
-            if not settings.get("enableAiCredits"):
-                logger.info("Enabling AI Credits fallback in settings.json")
-                settings["enableAiCredits"] = True
-                settings_modified = True
-                
-            if settings_modified:
                 with open(SETTINGS_PATH, "w") as f:
                     json.dump(settings, f, indent=2)
         except Exception as e:
