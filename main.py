@@ -42,25 +42,40 @@ _semaphore = threading.Semaphore(MAX_CONCURRENT)
 _settings_lock = threading.Lock()
 
 # --- Model Mapping ---
-# Maps OpenAI-style model names to agy internal model identifiers
+# Maps OpenAI-style model names to agy settings.json display labels
+# IMPORTANT: agy requires human-readable labels, NOT API identifiers
 MODEL_MAP = {
-    "gemini-3.1-pro-high": "gemini-3.1-pro",
-    "gemini-3.5-flash-high": "gemini-2.5-flash",
-    "claude-4-5-sonnet": "claude-3-5-sonnet",
-    "claude-opus-4-6": "claude-3-opus",
-    "google-jarvis-v4s": "google-jarvis-v4s",
+    # --- Gemini models ---
+    "gemini-3.1-pro-high": "Gemini 3.1 Pro (High)",
+    "gemini-3.1-pro": "Gemini 3.1 Pro (High)",
+    "gemini-2.5-pro": "Gemini 2.5 Pro",
+    "gemini-3.5-flash-high": "Gemini 3.5 Flash (High)",
+    "gemini-3.5-flash": "Gemini 3.5 Flash (High)",
+    "gemini-2.5-flash": "Gemini 2.5 Flash",
 
-    # Common OpenAI / Anthropic client fallbacks
-    "gpt-4-turbo": "gemini-3.1-pro",
-    "gpt-4": "gemini-3.1-pro",
-    "gpt-4o": "gemini-3.1-pro",
-    "gpt-4o-mini": "gemini-2.5-flash",
-    "gpt-3.5-turbo": "gemini-2.5-flash",
-    "claude-3-5-sonnet": "claude-3-5-sonnet",
-    "claude-3-opus": "claude-3-opus",
-    "claude-3-haiku": "gemini-2.5-flash",
-    "pro": "gemini-3.1-pro",
-    "flash": "gemini-2.5-flash",
+    # --- Claude models ---
+    "claude-opus-4-6": "Claude Opus 4.6 (Thinking)",
+    "claude-opus-4-5": "Claude Opus 4.5 (Thinking)",
+    "claude-opus-4": "Claude Opus 4 (Thinking)",
+    "claude-sonnet-4-5": "Claude 4.5 Sonnet (Thinking)",
+    "claude-sonnet-4": "Claude 4 Sonnet (Thinking)",
+    "claude-4-5-sonnet": "Claude 4.5 Sonnet (Thinking)",
+
+    # --- OpenAI compat aliases ---
+    "gpt-4-turbo": "Gemini 3.1 Pro (High)",
+    "gpt-4": "Gemini 3.1 Pro (High)",
+    "gpt-4o": "Gemini 3.1 Pro (High)",
+    "gpt-4o-mini": "Gemini 3.5 Flash (High)",
+    "gpt-3.5-turbo": "Gemini 3.5 Flash (High)",
+
+    # --- Legacy Anthropic compat aliases ---
+    "claude-3-5-sonnet": "Claude 4.5 Sonnet (Thinking)",
+    "claude-3-opus": "Claude Opus 4.6 (Thinking)",
+    "claude-3-haiku": "Gemini 3.5 Flash (High)",
+
+    # --- Shorthand ---
+    "pro": "Gemini 3.1 Pro (High)",
+    "flash": "Gemini 3.5 Flash (High)",
 }
 
 def switch_model(model: str):
@@ -68,22 +83,20 @@ def switch_model(model: str):
     if not model or model in ("antigravity", "antigravity-commercial"):
         return
     
-    # Resolve standard key to real model, fallback to model name substring check, then default to gemini-2.5-pro
+    # Resolve standard key to real model label, fallback to substring check
     target_model = MODEL_MAP.get(model)
     if not target_model:
         model_lower = model.lower()
         if "flash" in model_lower or "mini" in model_lower or "turbo" in model_lower or "lite" in model_lower:
-            target_model = "gemini-3.5-flash-high"
-        elif "sonnet" in model_lower:
-            target_model = "claude-3-5-sonnet"
+            target_model = "Gemini 3.5 Flash (High)"
         elif "opus" in model_lower:
-            target_model = "claude-3-opus"
-        elif "jarvis" in model_lower:
-            target_model = "google-jarvis-v4s"
-        elif "pro" in model_lower or "3.1" in model_lower or "3.5" in model_lower:
-            target_model = "gemini-3.5-pro-preview"
+            target_model = "Claude Opus 4.6 (Thinking)"
+        elif "sonnet" in model_lower:
+            target_model = "Claude 4.5 Sonnet (Thinking)"
+        elif "pro" in model_lower or "3.1" in model_lower:
+            target_model = "Gemini 3.1 Pro (High)"
         else:
-            target_model = "gemini-3.5-flash-high"  # Robust default fallback
+            target_model = "Gemini 3.5 Flash (High)"  # Safe default fallback
 
     with _settings_lock:
         try:
