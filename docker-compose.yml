@@ -5,16 +5,20 @@ services:
     build: .
     container_name: agy-gw-commercial
     restart: always
-    ports:
-      - "8789:8789"
+    network_mode: "host"
     environment:
       - PORT=8789
-      - HOST=0.0.0.0
+      - HOST=127.0.0.1
       - AGY_BIN=/usr/local/bin/agy
       - MAX_CONCURRENT=5
       - LOG_LEVEL=INFO
       - ANTIGRAVITY_AGENT=1
       - HOME=/root
+      - ANTIGRAVITY_LS_ADDRESS=localhost:13723
+      - ANTIGRAVITY_CSRF_TOKEN=
+      - ANTIGRAVITY_PROJECT_ID=2af174aa-0852-4888-ad53-1bc88c32de06
+      - ANTIGRAVITY_TRAJECTORY_ID=b1d1cf83-4fdd-402d-a39a-d742980868e1
+      - SSH_CLIENT=127.0.0.1 1 1
     volumes:
       - /etc/machine-id:/etc/machine-id:ro
       - /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro

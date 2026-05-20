@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import select
 import signal
 import sys
 import time
@@ -48,25 +49,85 @@ MODEL_MAP = {
     "claude-4-5-sonnet": "claude-3-5-sonnet",
     "claude-opus-4-6": "claude-3-opus",
     "google-jarvis-v4s": "google-jarvis-v4s",
-    # Pass-through: if not in map, use as-is
+
+    # Common OpenAI / Anthropic client fallbacks
+    "gpt-4-turbo": "gemini-2.5-pro",
+    "gpt-4": "gemini-2.5-pro",
+    "gpt-4o": "gemini-2.5-pro",
+    "gpt-4o-mini": "gemini-2.5-flash",
+    "gpt-3.5-turbo": "gemini-2.5-flash",
+    "claude-3-5-sonnet": "claude-3-5-sonnet",
+    "claude-3-opus": "claude-3-opus",
+    "claude-3-haiku": "gemini-2.5-flash",
+    "pro": "gemini-2.5-pro",
+    "flash": "gemini-2.5-flash",
 }
 
 def switch_model(model: str):
-    """Hot-swap the model in settings.json."""
+    """Hot-swap the model in settings.json with smart fallback."""
     if not model or model in ("antigravity", "antigravity-commercial"):
         return
+    
+    # Resolve standard key to real model, fallback to model name substring check, then default to gemini-2.5-pro
+    target_model = MODEL_MAP.get(model)
+    if not target_model:
+        model_lower = model.lower()
+        if "flash" in model_lower or "mini" in model_lower or "turbo" in model_lower or "3.5" in model_lower or "lite" in model_lower:
+            target_model = "gemini-2.5-flash"
+        elif "sonnet" in model_lower:
+            target_model = "claude-3-5-sonnet"
+        elif "opus" in model_lower:
+            target_model = "claude-3-opus"
+        elif "jarvis" in model_lower:
+            target_model = "google-jarvis-v4s"
+        else:
+            target_model = "gemini-2.5-pro"  # Robust default fallback
+
     with _settings_lock:
         try:
             with open(SETTINGS_PATH, "r") as f:
                 settings = json.load(f)
             current = settings.get("model")
-            if current != model:
-                logger.info(f"Switching model: {current} -> {model}")
-                settings["model"] = model
+            if current != target_model:
+                logger.info(f"Switching model: {current} -> {target_model} (requested: {model})")
+                settings["model"] = target_model
                 with open(SETTINGS_PATH, "w") as f:
                     json.dump(settings, f)
         except Exception as e:
             logger.error(f"Model switch failed: {e}")
+
+def spawn_agy_process(args, env):
+    """Spawns agy process and checks for authentication prompts within 0.8 seconds."""
+    proc = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+        cwd="/root",
+    )
+    
+    # Wait up to 0.8 seconds for initial stdout data using select
+    rlist, _, _ = select.select([proc.stdout], [], [], 0.8)
+    if rlist:
+        # Check the first line of stdout
+        first_line_bytes = proc.stdout.readline()
+        first_line = first_line_bytes.decode("utf-8", errors="ignore")
+        if "Authentication required" in first_line or "Waiting for authentication" in first_line or "visit" in first_line or "auth" in first_line.lower():
+            proc.terminate()
+            proc.wait()
+            raise PermissionError(
+                "Antigravity Gateway is not authenticated. "
+                "Please run 'docker exec -it agy-gw-commercial auth' in your host terminal to authenticate."
+            )
+        # Return proc and the first line we already read so it doesn't get lost
+        return proc, first_line_bytes
+    
+    # Check if process exited with error immediately
+    if proc.poll() is not None and proc.returncode != 0:
+        stderr_output = proc.stderr.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"agy process exited immediately with code {proc.returncode}: {stderr_output}")
+        
+    return proc, b""
 
 def run_agy(prompt: str, model: str = None):
     """Execute agy --print synchronously and return the output."""
@@ -77,26 +138,28 @@ def run_agy(prompt: str, model: str = None):
         "DO_NOT_TRACK": "1",
         "SENTRY_DSN": "",
         "GOOGLE_ANALYTICS_ID": "",
+        "SSH_CLIENT": "127.0.0.1 1 1",
     })
+
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
 
     args = [AGY_BIN, "--print", prompt]
     logger.debug(f"Exec: {' '.join(args)}")
 
     _semaphore.acquire()
     try:
-        proc = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
+        proc, first_line_bytes = spawn_agy_process(args, env)
+        stdout_output = first_line_bytes.decode("utf-8", errors="ignore")
+        stdout_output += proc.stdout.read().decode("utf-8", errors="ignore")
+        proc.wait()
         if proc.returncode != 0:
-            logger.error(f"agy stderr: {proc.stderr[:500]}")
-        return proc.stdout.strip()
-    except subprocess.TimeoutExpired:
-        logger.error("agy process timed out (300s)")
-        return "[Error] Request timed out."
+            err = proc.stderr.read().decode("utf-8", errors="ignore")
+            logger.error(f"agy stderr: {err[:500]}")
+        return stdout_output.strip()
+    except PermissionError as e:
+        logger.error(f"Auth error: {e}")
+        return f"[Error] {e}"
     except Exception as e:
         logger.error(f"agy exec error: {e}")
         return f"[Error] {e}"
@@ -112,25 +175,29 @@ def run_agy_stream(prompt: str, model: str = None):
         "DO_NOT_TRACK": "1",
         "SENTRY_DSN": "",
         "GOOGLE_ANALYTICS_ID": "",
+        "SSH_CLIENT": "127.0.0.1 1 1",
     })
+
+    if not isinstance(prompt, str):
+        prompt = str(prompt)
 
     args = [AGY_BIN, "--print", prompt]
     logger.debug(f"Exec (stream): {' '.join(args)}")
 
     _semaphore.acquire()
     try:
-        proc = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-        )
+        proc, first_line_bytes = spawn_agy_process(args, env)
+        if first_line_bytes:
+            yield first_line_bytes.decode("utf-8", errors="ignore")
         for chunk in iter(lambda: proc.stdout.read(512), b""):
             yield chunk.decode("utf-8", errors="ignore")
         proc.wait()
         if proc.returncode != 0:
             err = proc.stderr.read().decode("utf-8", "ignore")
             logger.error(f"agy stderr: {err[:500]}")
+    except PermissionError as e:
+        logger.error(f"Auth error in stream: {e}")
+        yield f"[Error] {e}"
     except Exception as e:
         logger.error(f"agy stream error: {e}")
         yield f"[Error] {e}"
@@ -200,12 +267,54 @@ class GatewayHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
 
         messages = body.get("messages", [])
-        prompt = messages[-1]["content"] if messages else ""
+        
+        # Build prompt from messages history
+        formatted_prompt = ""
+        last_message_text = ""
+        
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            # Parse content if list/array
+            text_content = ""
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            parts.append(part.get("text", ""))
+                        elif "text" in part:
+                            parts.append(part["text"])
+                    elif isinstance(part, str):
+                        parts.append(part)
+                text_content = "".join(parts)
+            else:
+                text_content = str(content)
+            
+            last_message_text = text_content
+            
+            role_capitalized = role.capitalize()
+            if role == "system":
+                formatted_prompt += f"Instructions: {text_content}\n\n"
+            else:
+                formatted_prompt += f"{role_capitalized}: {text_content}\n"
+        
+        if len(messages) > 1:
+            # Multi-turn conversation: prompt model to reply as assistant
+            formatted_prompt += "Assistant: "
+            prompt = formatted_prompt
+        else:
+            # Single-turn conversation: pass text-content directly as-is
+            prompt = last_message_text
+
         stream = body.get("stream", False)
         model = body.get("model", "gemini-3.1-pro-high")
         req_id = str(uuid.uuid4())[:8]
 
-        logger.info(f"[{req_id}] Model={model} Stream={stream} Prompt={prompt[:40]}...")
+        # Log prompt safely
+        logged_prompt = prompt.replace("\n", " ")
+        logger.info(f"[{req_id}] Model={model} Stream={stream} Prompt={logged_prompt[:40]}...")
 
         if stream:
             self._handle_stream(req_id, prompt, model)
