@@ -44,22 +44,22 @@ _settings_lock = threading.Lock()
 # --- Model Mapping ---
 # Maps OpenAI-style model names to agy internal model identifiers
 MODEL_MAP = {
-    "gemini-3.1-pro-high": "gemini-2.5-pro",
+    "gemini-3.1-pro-high": "gemini-3.1-pro",
     "gemini-3.5-flash-high": "gemini-2.5-flash",
     "claude-4-5-sonnet": "claude-3-5-sonnet",
     "claude-opus-4-6": "claude-3-opus",
     "google-jarvis-v4s": "google-jarvis-v4s",
 
     # Common OpenAI / Anthropic client fallbacks
-    "gpt-4-turbo": "gemini-2.5-pro",
-    "gpt-4": "gemini-2.5-pro",
-    "gpt-4o": "gemini-2.5-pro",
+    "gpt-4-turbo": "gemini-3.1-pro",
+    "gpt-4": "gemini-3.1-pro",
+    "gpt-4o": "gemini-3.1-pro",
     "gpt-4o-mini": "gemini-2.5-flash",
     "gpt-3.5-turbo": "gemini-2.5-flash",
     "claude-3-5-sonnet": "claude-3-5-sonnet",
     "claude-3-opus": "claude-3-opus",
     "claude-3-haiku": "gemini-2.5-flash",
-    "pro": "gemini-2.5-pro",
+    "pro": "gemini-3.1-pro",
     "flash": "gemini-2.5-flash",
 }
 
@@ -80,6 +80,8 @@ def switch_model(model: str):
             target_model = "claude-3-opus"
         elif "jarvis" in model_lower:
             target_model = "google-jarvis-v4s"
+        elif "pro" in model_lower or "3.1" in model_lower:
+            target_model = "gemini-3.1-pro"
         else:
             target_model = "gemini-2.5-pro"  # Robust default fallback
 
