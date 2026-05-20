@@ -207,6 +207,91 @@ def run_agy_stream(prompt: str, model: str = None):
         _semaphore.release()
 
 
+def split_thinking_text(text: str):
+    """Splits full response text into (reasoning_content, content) if it contains <think>...</think>."""
+    if not text:
+        return None, ""
+    
+    start_tag = "<think>"
+    end_tag = "</think>"
+    
+    start_idx = text.find(start_tag)
+    if start_idx != -1:
+        end_idx = text.find(end_tag, start_idx + len(start_tag))
+        if end_idx != -1:
+            reasoning = text[start_idx + len(start_tag):end_idx]
+            content = text[:start_idx] + text[end_idx + len(end_tag):]
+            return reasoning.strip(), content.strip()
+        else:
+            reasoning = text[start_idx + len(start_tag):]
+            content = text[:start_idx]
+            return reasoning.strip(), content.strip()
+            
+    return None, text
+
+def parse_thinking_stream(generator):
+    """
+    Parses a stream of text chunks, detecting <think> and </think> tags,
+    yielding tuples of (field_name, text) where field_name is either
+    'reasoning_content' or 'content'.
+    """
+    state = "content"
+    buffer = ""
+    
+    for chunk in generator:
+        buffer += chunk
+        
+        while buffer:
+            if state == "content":
+                idx = buffer.find("<think>")
+                if idx != -1:
+                    text_before = buffer[:idx]
+                    if text_before:
+                        yield "content", text_before
+                    buffer = buffer[idx + 7:]
+                    state = "reasoning"
+                else:
+                    # Check for partial <think> tag
+                    partial_len = 0
+                    for i in range(1, min(7, len(buffer) + 1)):
+                        suffix = buffer[-i:]
+                        if "<think>".startswith(suffix):
+                            partial_len = i
+                    if partial_len > 0:
+                        text_to_yield = buffer[:-partial_len]
+                        buffer = buffer[-partial_len:]
+                    else:
+                        text_to_yield = buffer
+                        buffer = ""
+                    if text_to_yield:
+                        yield "content", text_to_yield
+            elif state == "reasoning":
+                idx = buffer.find("</think>")
+                if idx != -1:
+                    text_before = buffer[:idx]
+                    if text_before:
+                        yield "reasoning_content", text_before
+                    buffer = buffer[idx + 8:]
+                    state = "content"
+                else:
+                    # Check for partial </think> tag
+                    partial_len = 0
+                    for i in range(1, min(8, len(buffer) + 1)):
+                        suffix = buffer[-i:]
+                        if "</think>".startswith(suffix):
+                            partial_len = i
+                    if partial_len > 0:
+                        text_to_yield = buffer[:-partial_len]
+                        buffer = buffer[-partial_len:]
+                    else:
+                        text_to_yield = buffer
+                        buffer = ""
+                    if text_to_yield:
+                        yield "reasoning_content", text_to_yield
+    if buffer:
+        yield "content" if state == "content" else "reasoning_content", buffer
+
+
 class GatewayHandler(BaseHTTPRequestHandler):
     """Handles OpenAI-compatible API requests."""
 
@@ -325,6 +410,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def _handle_block(self, req_id, prompt, model):
         output = run_agy(prompt, model)
+        reasoning_content, content = split_thinking_text(output)
+        
+        message = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+
         self._send_json(200, {
             "id": f"chatcmpl-{req_id}",
             "object": "chat.completion",
@@ -332,7 +423,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": output},
+                "message": message,
                 "finish_reason": "stop"
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -346,8 +437,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
-        for chunk in run_agy_stream(prompt, model):
-            if not chunk:
+        # Parse stream using helper to dynamically separate thinking from final content
+        for field_name, text in parse_thinking_stream(run_agy_stream(prompt, model)):
+            if not text:
                 continue
             payload = {
                 "id": f"chatcmpl-{req_id}",
@@ -356,7 +448,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "delta": {"content": chunk},
+                    "delta": {field_name: text},
                     "finish_reason": None
                 }]
             }
