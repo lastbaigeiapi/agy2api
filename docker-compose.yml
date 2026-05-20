@@ -20,8 +20,8 @@ services:
       - /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro
       # 关键：挂载宿主机的认证 Token 目录
       - /root/.gemini:/root/.gemini
-      # 关键：挂载 agy 二进制文件
-      - /root/.local/bin/agy:/usr/local/bin/agy
+      # 关键：挂载 agy 二进制文件 (使用已打补丁延长超时为 180s 的版本)
+      - /root/.local/bin/agy_patched:/usr/local/bin/agy
       # 挂载宿主机的项目根目录（如果需要 agy 操作宿主机文件）
       - /root:/root
     logging:
