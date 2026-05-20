@@ -47,7 +47,7 @@ MODEL_MAP = {
     "gemini-3.5-flash-high": "gemini-2.5-flash",
     "claude-4-5-sonnet": "claude-3-5-sonnet",
     "claude-opus-4-6": "claude-3-opus",
-    "google-jarvis-v4s": "gemini-2.5-pro",
+    "google-jarvis-v4s": "google-jarvis-v4s",
     # Pass-through: if not in map, use as-is
 }
 

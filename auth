@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+export HOME=/root
+export ANTIGRAVITY_AGENT=1
+export PATH=/root/.gemini/antigravity-cli/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+echo "Starting Antigravity OAuth Interactive Flow..."
+exec /usr/local/bin/agy --print "Authentication Initialization"

@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  agy-gw:
+    build: .
+    container_name: agy-gw-commercial
+    restart: always
+    ports:
+      - "8789:8789"
+    environment:
+      - PORT=8789
+      - HOST=0.0.0.0
+      - AGY_BIN=/usr/local/bin/agy
+      - MAX_CONCURRENT=5
+      - LOG_LEVEL=INFO
+      - ANTIGRAVITY_AGENT=1
+      - HOME=/root
+    volumes:
+      - /etc/machine-id:/etc/machine-id:ro
+      - /var/lib/dbus/machine-id:/var/lib/dbus/machine-id:ro
+      # 关键：挂载宿主机的认证 Token 目录
+      - /root/.gemini:/root/.gemini
+      # 关键：挂载 agy 二进制文件
+      - /root/.local/bin/agy:/usr/local/bin/agy
+      # 挂载宿主机的项目根目录（如果需要 agy 操作宿主机文件）
+      - /root:/root
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10mb"
+        max-file: "3"
