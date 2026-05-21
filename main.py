@@ -45,21 +45,24 @@ _settings_lock = threading.Lock()
 # Maps OpenAI-style model names to agy settings.json display labels
 # IMPORTANT: agy requires human-readable labels, NOT API identifiers
 MODEL_MAP = {
-    # --- Gemini models ---
+    # --- Available Gemini models ---
     "gemini-3.1-pro-high": "Gemini 3.1 Pro (High)",
     "gemini-3.1-pro": "Gemini 3.1 Pro (High)",
-    "gemini-2.5-pro": "Gemini 2.5 Pro",
+    "gemini-2.5-pro": "Gemini 3.1 Pro (High)",  # 2.5 Pro no longer available, mapped to 3.1 Pro
     "gemini-3.5-flash-high": "Gemini 3.5 Flash (High)",
     "gemini-3.5-flash": "Gemini 3.5 Flash (High)",
-    "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-2.5-flash": "Gemini 3.5 Flash (High)",
 
-    # --- Claude models ---
+    # --- Available Claude models ---
     "claude-opus-4-6": "Claude Opus 4.6 (Thinking)",
-    "claude-opus-4-5": "Claude Opus 4.5 (Thinking)",
-    "claude-opus-4": "Claude Opus 4 (Thinking)",
-    "claude-sonnet-4-5": "Claude 4.5 Sonnet (Thinking)",
-    "claude-sonnet-4": "Claude 4 Sonnet (Thinking)",
-    "claude-4-5-sonnet": "Claude 4.5 Sonnet (Thinking)",
+    
+    # --- Fallbacks for models the account doesn't have access to ---
+    # (These were tested and they fall back to Flash natively, so we map them to the best available alternative)
+    "claude-opus-4-5": "Claude Opus 4.6 (Thinking)",
+    "claude-opus-4": "Claude Opus 4.6 (Thinking)",
+    "claude-sonnet-4-5": "Claude Opus 4.6 (Thinking)",
+    "claude-sonnet-4": "Claude Opus 4.6 (Thinking)",
+    "claude-4-5-sonnet": "Claude Opus 4.6 (Thinking)",
 
     # --- OpenAI compat aliases ---
     "gpt-4-turbo": "Gemini 3.1 Pro (High)",
@@ -69,7 +72,7 @@ MODEL_MAP = {
     "gpt-3.5-turbo": "Gemini 3.5 Flash (High)",
 
     # --- Legacy Anthropic compat aliases ---
-    "claude-3-5-sonnet": "Claude 4.5 Sonnet (Thinking)",
+    "claude-3-5-sonnet": "Claude Opus 4.6 (Thinking)",
     "claude-3-opus": "Claude Opus 4.6 (Thinking)",
     "claude-3-haiku": "Gemini 3.5 Flash (High)",
 
